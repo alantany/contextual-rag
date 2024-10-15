@@ -23,9 +23,9 @@ def display_chunk(chunk_id, chunk_content):
 def submit_question():
     st.session_state.submit_question = True
 
-st.set_page_config(page_title="文档问答系统", page_icon="📚", layout="wide")
+st.set_page_config(page_title="上下文增强RAG", page_icon="📚", layout="wide")
 
-st.title("文档问答系统")
+st.title("上下文增强RAG")
 
 # 确保 data 目录存在
 if not os.path.exists("data"):
@@ -97,8 +97,8 @@ if st.session_state.submit_question and question:
         # 创建一个可展开的部分来显示引用
         with st.expander("引用"):
             for citation in rag_response['citations']:
-                st.write(f"Chunk ID: {citation['chunk_id']}")
-                st.write(citation['content'])
+                st.write(f"文本块 ID: {citation['chunk_id']}")
+                st.write(f"内容: {citation['content']}")
                 st.write("---")
 
         st.subheader("上下文感知 RAG 输出:")
@@ -110,11 +110,13 @@ if st.session_state.submit_question and question:
         # 创建一个可展开的部分来显示上下文感知引用
         with st.expander("上下文感知引用"):
             for citation in contextual_response['citations']:
-                st.write(f"Chunk ID: {citation['chunk_id']}")
-                st.write("Content:")
+                st.write(f"文本块 ID: {citation['chunk_id']}")
+                st.write("内容:")
                 st.write(citation['content'])
-                st.write("Context:")
-                st.write(citation['context'])
+                st.write("上下文:")
+                # 移除 'chunk:' 和 'chunk_context:' 前缀
+                context = citation['context'].replace('chunk:', '').replace('chunk_context:', '').strip()
+                st.write(context)
                 st.write("---")
 
         # 重置提交状态
@@ -134,6 +136,35 @@ st.sidebar.markdown("""
 3. 查看生成的答案
 4. 您可以继续提问，无需每次都上传文档
 """)
+
+st.sidebar.header("上下文增强RAG（Contextual Retrieval）的特点和优势")
+st.sidebar.markdown("""
+上下文增强RAG（Contextual Retrieval）是一种先进的检索增强生成技术，由 Anthropic 提出。它具有以下特点和优势：
+
+1. 显著提高检索准确性：相比传统RAG方法，Contextual Retrieval可以减少49%的检索失败率。
+
+2. 保留上下文信息：通过在编码时保留chunk的上下文信息，解决了传统RAG方法可能丢失重要上下文的问题。
+
+3. 提高相关信息检索：通过结合语义嵌入和精确匹配（BM25），能更好地检索到相关信息，特别是对于包含唯一标识符或技术术语的查询。
+
+4. 增强模型理解：通过提供更丰富的上下文，帮助模型更好地理解和回答复杂问题。
+
+5. 适应性强：可以处理各种类型的文档和问题，适用于多种领域，如客户支持、法律分析等。
+
+6. 可扩展性：能够处理大规模知识库，远超单个提示可以容纳的范围。
+
+7. 实现简单：可以通过简单的提示工程来实现，无需复杂的模型训练。
+
+8. 成本效益高：结合 Claude 的提示缓存功能，可以显著降低处理成本。
+
+9. 与重排序结合效果更佳：当与重排序技术结合时，可以将检索失败率降低高达67%。
+
+这种方法通过保留和利用上下文信息，显著提高了信息检索的准确性和相关性，从而增强了AI系统回答复杂问题的能力。
+""")
+
+# 在页面底部添加开发者信息
+st.markdown("---")
+st.markdown("开发者: Huaiyuan Tan")
 
 def validate_lancedb_data():
     l_client = lancedb.connect("vectordb.lance")

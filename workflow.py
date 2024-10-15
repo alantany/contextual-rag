@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 from typing import List
-import fitz  # PyMuPDF库用于处理PDF
+from PyMuPDF import fitz  # 修改这一行
 
 import httpx
 import lancedb
@@ -33,13 +33,13 @@ global_model = None
 
 # TODO User set this
 contextual_retrieval_prompt = """
-Here is the chunk we want to situate within the whole document
+这是我们想要在整个文档中定位的文本块：
 <chunk>
 {chunk_content}
 </chunk>
 
-Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk.
-Answer only with the succinct context and nothing else.
+请提供一个简洁的上下文描述，以帮助我们理解这个文本块在整个文档中的位置和重要性，从而改善对这个文本块的搜索检索。
+只需回答简洁的上下文描述，不要添加其他内容。请使用中文回答。
 """
 
 
@@ -216,7 +216,7 @@ def rag_call(payload):
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "你是一个AI助手，负责分析文档并回答相关问题。请用中文提供你的答案。在回答的开头，请严格按照'患者姓名：<姓名>'的格式提供患者姓名，然后换行继续你的回答。"},
+            {"role": "system", "content": "你是一个AI助手，负责分析文档并回答相关问题。请用中文提供你的答案。在回答的开头，请严格按照'患者姓名：<姓名>'的格式提供患者姓名，然后换行继续你的回答。所有输出，包括'答案'、'解释'、'信心'等标签，以及任何上下文描述，都应该使用中文。"},
             {"role": "user", "content": payload}
         ]
     )
@@ -232,7 +232,7 @@ def parse_pdf(file_path):
         with fitz.open(file_path) as doc:
             for page in doc:
                 text += page.get_text()
-        logging.info(f"PDF文件解析完成，共 {len(text)} 个字符")
+        logging.info(f"PDF文件解析完成共 {len(text)} 个字符")
         return text
     except Exception as e:
         logging.error(f"解析PDF文件时出错: {str(e)}")
