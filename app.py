@@ -6,6 +6,7 @@ import traceback
 import lancedb
 import pyarrow as pa
 import re
+from indexify.functions_sdk.graph import Graph
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -37,8 +38,10 @@ def process_all_pdfs():
         file_path = os.path.join("data", pdf_file)
         try:
             with st.spinner(f"正在处理文档: {pdf_file}"):
+                st.text(f"开始解析 PDF 文件: {pdf_file}")
                 doc = parse_pdf(file_path)
-                process_document(doc)
+                st.text(f"PDF 解析完成，开始处理文档内容")
+                process_document(doc, pdf_file)
             st.success(f"文档 {pdf_file} 处理完成!")
         except Exception as e:
             st.error(f"处理文档 {pdf_file} 时发生错误: {str(e)}")
@@ -63,7 +66,7 @@ if uploaded_file is not None:
         if st.button("处理新上传的文档"):
             with st.spinner("正在处理文档..."):
                 doc = parse_pdf(file_path)
-                process_document(doc)
+                process_document(doc, uploaded_file.name)
             st.success("文档处理完成!")
     except Exception as e:
         st.error(f"处理文档时发生错误: {str(e)}")
@@ -86,64 +89,33 @@ if st.session_state.submit_question and question:
             rag_response, contextual_response = answer_question(question)
         
         st.subheader("RAG 输出:")
-        st.write(rag_response)
+        st.markdown(f"**{rag_response['patient_name']}**")
+        st.markdown(f"**{rag_response['answer']}**")
+        st.markdown(f"**{rag_response['explanation']}**")
+        st.markdown(f"**{rag_response['confidence']}**")
         
-        # 检查是否有警告信息
-        if "警告：" in rag_response:
-            st.warning(rag_response.split("警告：")[-1])
+        # 创建一个可展开的部分来显示引用
+        with st.expander("引用"):
+            for citation in rag_response['citations']:
+                st.write(f"Chunk ID: {citation['chunk_id']}")
+                st.write(citation['content'])
+                st.write("---")
 
-        # 提取引用的块ID（从模型输出中）
-        rag_citations = [int(id) for id in re.findall(r'\d+', rag_response.split('引用：')[-1])]
-        
-        # 显示引用的文本块
-        if rag_citations:
-            st.subheader("RAG 引用的文本块:")
-            l_client = lancedb.connect("vectordb.lance")
-            table = l_client.open_table("chunk-embeddings")
-            chunks = table.to_arrow()
-            logging.info(f"RAG chunks 类型: {type(chunks)}")
-            logging.info(f"RAG chunks 列名: {chunks.column_names}")
-            logging.info(f"RAG chunks 长度: {len(chunks)}")
-            logging.info(f"RAG 引用的块ID: {rag_citations}")
-            for i, chunk_id in enumerate(rag_citations):
-                try:
-                    chunk_content = chunks.column('chunk')[chunk_id].as_py()
-                    display_chunk(f"{chunk_id}_{i}", chunk_content)  # 使用 chunk_id 和计数器 i 创建唯一键
-                except IndexError:
-                    st.warning(f"引用的文本块 {chunk_id} 不存在")
-                    logging.warning(f"引用的文本块 {chunk_id} 超出范围 (0-{len(chunks)-1})")
-                except Exception as e:
-                    st.error(f"访问文本块 {chunk_id} 时发生错误: {str(e)}")
-                    logging.error(f"访问文本块 {chunk_id} 时发生错误: {str(e)}")
-                    logging.error(traceback.format_exc())
-        
         st.subheader("上下文感知 RAG 输出:")
-        st.write(contextual_response)
+        st.markdown(f"**{contextual_response['patient_name']}**")
+        st.markdown(f"**{contextual_response['answer']}**")
+        st.markdown(f"**{contextual_response['explanation']}**")
+        st.markdown(f"**{contextual_response['confidence']}**")
         
-        # 提取引用的块ID（从模型输出中）
-        contextual_citations = [int(id) for id in re.findall(r'\d+', contextual_response.split('引用：')[-1])]
-        
-        # 显示引用的文本块（上下文感知 RAG）
-        if contextual_citations:
-            st.subheader("上下文感知 RAG 引用的文本块:")
-            l_client = lancedb.connect("vectordb.lance")
-            table = l_client.open_table("contextual-chunk-embeddings")
-            chunks = table.to_arrow()
-            logging.info(f"上下文感知 RAG chunks 类型: {type(chunks)}")
-            logging.info(f"上下文感知 RAG chunks 列名: {chunks.column_names}")
-            logging.info(f"上下文感知 RAG chunks 长度: {len(chunks)}")
-            logging.info(f"上下文感知 RAG 引用的块ID: {contextual_citations}")
-            for i, chunk_id in enumerate(contextual_citations):
-                try:
-                    chunk_content = chunks.column('chunk')[chunk_id].as_py()
-                    display_chunk(f"contextual_{chunk_id}_{i}", chunk_content)  # 使用 chunk_id 和计数器 i 创建唯一键
-                except IndexError:
-                    st.warning(f"引用的文本块 {chunk_id} 不存在")
-                    logging.warning(f"引用的文本块 {chunk_id} 超出范围 (0-{len(chunks)-1})")
-                except Exception as e:
-                    st.error(f"访问文本块 {chunk_id} 时发生错误: {str(e)}")
-                    logging.error(f"访问文本块 {chunk_id} 时发生错误: {str(e)}")
-                    logging.error(traceback.format_exc())
+        # 创建一个可展开的部分来显示上下文感知引用
+        with st.expander("上下文感知引用"):
+            for citation in contextual_response['citations']:
+                st.write(f"Chunk ID: {citation['chunk_id']}")
+                st.write("Content:")
+                st.write(citation['content'])
+                st.write("Context:")
+                st.write(citation['context'])
+                st.write("---")
 
         # 重置提交状态
         st.session_state.submit_question = False
@@ -162,3 +134,16 @@ st.sidebar.markdown("""
 3. 查看生成的答案
 4. 您可以继续提问，无需每次都上传文档
 """)
+
+def validate_lancedb_data():
+    l_client = lancedb.connect("vectordb.lance")
+    chunks = l_client.open_table("chunk-embeddings").to_arrow()
+    for i, chunk in enumerate(chunks):
+        patient_name = extract_patient_name(chunk['chunk'].as_py())
+        print(f"Chunk {i}: Patient: {patient_name}, Content: {chunk['chunk'].as_py()[:100]}...")  # 打印前100个字符
+
+def process_document(doc, file_name):
+    g: Graph = Graph("test", start_node=generate_chunk_contexts)
+    g.add_edge(generate_chunk_contexts, TextEmbeddingExtractor)
+    g.add_edge(TextEmbeddingExtractor, LanceDBWriter)
+    g.run(block_until_done=True, doc=doc, file_name=file_name)
