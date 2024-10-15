@@ -39,7 +39,7 @@ contextual_retrieval_prompt = """
 </chunk>
 
 请提供一个简洁的上下文描述，以帮助我们理解这个文本块在整个文档中的位置和重要性，从而改善对这个文本块的搜索检索。
-只需回答简洁的上下文描述，不要添加其他内容。请使用中文回答。
+只需回答简洁的上下文描述，不要添加其他内容。请务必使用中文回答，不要包含任何英文。
 """
 
 
@@ -216,7 +216,7 @@ def rag_call(payload):
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "你是一个AI助手，负责分析文档并回答相关问题。请用中文提供你的答案。在回答的开头，请严格按照'患者姓名：<姓名>'的格式提供患者姓名，然后换行继续你的回答。所有输出，包括'答案'、'解释'、'信心'等标签，以及任何上下文描述，都应该使用中文。"},
+            {"role": "system", "content": "你是一个AI助手，负责分析文档并回答相关问题。请严格使用中文提供你的答案，不要包含任何英文。在回答的开头，请严格按照'患者姓名：<姓名>'的格式提供患者姓名，然后换行继续你的回答。所有输出，包括'答案'、'解释'、'信心'等标签，以及任何上下文描述，都必须使用中文。如果你遇到任何英文术语，请尝试将其翻译成中文或者用中文解释。"},
             {"role": "user", "content": payload}
         ]
     )
@@ -409,6 +409,10 @@ def answer_question(question):
             "citations": contextual_folded_citations
         }
 
+        # 添加后处理步骤，将英文转换为中文
+        formatted_response = convert_english_to_chinese(formatted_response)
+        formatted_contextual_response = convert_english_to_chinese(formatted_contextual_response)
+
         logging.info("问题回答完成")
         return formatted_response, formatted_contextual_response
     except Exception as e:
@@ -527,6 +531,27 @@ def extract_cited_chunks_with_context(response):
             chunk_context = lines[2].strip()
             cited_chunks.append((chunk_id, chunk_content, chunk_context))
     return cited_chunks
+
+def convert_english_to_chinese(response):
+    # 这个函数将尝试将响应中的英文转换为中文
+    english_to_chinese = {
+        "chunk": "文本块",
+        "content": "内容",
+        "context": "上下文",
+        # 添加其他可能出现的英文词汇及其中文翻译
+    }
+    
+    for eng, chn in english_to_chinese.items():
+        if isinstance(response, dict):
+            for key in response:
+                if isinstance(response[key], str):
+                    response[key] = response[key].replace(eng, chn)
+                elif isinstance(response[key], list):
+                    response[key] = [convert_english_to_chinese(item) for item in response[key]]
+        elif isinstance(response, str):
+            response = response.replace(eng, chn)
+    
+    return response
 
 # 在文件末尾添加以下代码，确保在导入时就加载模型
 get_model()
