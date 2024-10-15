@@ -8,7 +8,7 @@ annotated-types==0.7.0
 anthropic==0.35.0
 anyio==4.6.0
 asttokens==2.4.1
-attrs==24.2.0
+attrs
 blinker==1.8.2
 boto3==1.35.39
 botocore==1.35.39
