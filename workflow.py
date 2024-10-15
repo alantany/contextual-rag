@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 from typing import List
-from PyMuPDF import fitz  # 修改这一行
+import fitz  # PyMuPDF库用于处理PDF
 
 import httpx
 import lancedb
