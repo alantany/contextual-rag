@@ -2,21 +2,21 @@ import json
 import os
 import tempfile
 from typing import List
-import fitz  # PyMuPDF库用于处理PDF
+try:
+    import fitz
+except ImportError:
+    from PyMuPDF import fitz
 
 import httpx
 import lancedb
 import openai
-from lancedb.pydantic import LanceModel, Vector
+from lancedb.pydantic import LanceModel, Vector as LanceVector
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rich import print
 from rich.console import Console
 from sentence_transformers import SentenceTransformer
 from pydantic import BaseModel
-
-from indexify.functions_sdk.graph import Graph
-from indexify.functions_sdk.image import Image
-from indexify.functions_sdk.indexify_functions import indexify_function, IndexifyFunction
+import numpy as np
 
 import streamlit as st
 import logging
@@ -31,54 +31,31 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # 在文件顶部添加全局变量
 global_model = None
 
-# TODO User set this
-contextual_retrieval_prompt = """
-这是我们想要在整个文档中定位的文本块：
-<chunk>
-{chunk_content}
-</chunk>
+# 定义数据模型
+class ChunkEmbeddingTable(LanceModel):
+    vector: LanceVector(768)
+    chunk: str
+    chunk_id: str
 
-请提供一个简洁的上下文描述，以帮助我们理解这个文本块在整个文档中的位置和重要性，从而改善对这个文本块的搜索检索。
-只需回答简洁的上下文描述，不要添加其他内容。请务必使用中文回答，不要包含任何英文。
-"""
-
-
-image = (
-    Image().name("tensorlake/contextual-rag")
-    .run("pip install indexify")
-    .run("pip install sentence-transformers")
-    .run("pip install lancedb")
-    .run("pip install openai")
-    .run("pip install langchain")
-)
-
-
-client = openai.OpenAI(
-    api_key="sk-iM6Jc42voEnIOPSKJfFY0ri7chsz4D13sozKyqg403Euwv5e",
-    base_url="https://api.chatanywhere.tech/v1"
-)
-
+class ContextualChunkEmbeddingTable(LanceModel):
+    vector: LanceVector(768)
+    chunk: str
+    chunk_with_context: str
+    chunk_id: str
 
 class ChunkContext(BaseModel):
     chunks: List[str]
     chunk_contexts: List[str]
-    chunk_ids: List[str]  # 添加chunk_ids到输出
+    chunk_ids: List[str]
 
-def extract_patient_name(text):
-    # 尝试匹配"姓名 xxx"格式
-    match = re.search(r'姓名\s+([^\s]+)', text)
-    if match:
-        return match.group(1).strip()
-    
-    # 如果上面失败，尝试匹配"xxx患者"格式
-    match = re.search(r'([^\s]+患者)', text)
-    if match:
-        return match.group(1).strip()
-    
-    return "未知患者"
+# OpenAI 客户端配置
+client = openai.OpenAI(
+    api_key="sk-1pUmQlsIkgla3CuvKTgCrzDZ3r0pBxO608YJvIHCN18lvOrn",
+    base_url="https://api.chatanywhere.tech/v1"
+)
 
-@indexify_function(image=image)
 def generate_chunk_contexts(doc: str, file_name: str) -> ChunkContext:
+    """生成文档块的上下文"""
     patient_name = os.path.splitext(file_name)[0]
     logging.info(f"从文件名中提取的患者姓名: {patient_name}")
 
@@ -96,15 +73,14 @@ def generate_chunk_contexts(doc: str, file_name: str) -> ChunkContext:
     chunk_ids = []
 
     for i, chunk in enumerate(chunks):
-        chunk_id = f"{patient_name}_{i}"  # 创建唯一的chunk ID
+        chunk_id = f"{patient_name}_{i}"
         chunk_with_name = f"患者姓名：{patient_name}\n\nchunk_id: {chunk_id}\n\n{chunk}"
         print(f"Processing chunk {i} of {len(chunks)} with size {len(chunk)}")
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant. Answer precisely."},
-                {"role": "system", "content": f"Answer using the contents of this document <document> {doc} </document>"},
-                {"role": "user", "content": contextual_retrieval_prompt.format(chunk_content=chunk_with_name)}
+                {"role": "user", "content": f"请为以下文本块提供简洁的上下文描述，帮助理解其在整个文档中的位置和重要性：\n\n{chunk_with_name}"}
             ]
         )
 
@@ -114,115 +90,105 @@ def generate_chunk_contexts(doc: str, file_name: str) -> ChunkContext:
         chunks_context_list.append(response.choices[0].message.content)
         chunk_ids.append(chunk_id)
 
-    output = ChunkContext(
+    return ChunkContext(
         chunks=chunks_list,
         chunk_contexts=chunks_context_list,
-        chunk_ids=chunk_ids,  # 添加chunk_ids输出
+        chunk_ids=chunk_ids,
     )
 
-    return output
+def process_embeddings(chunk_context: ChunkContext):
+    """处理文本嵌入"""
+    model = get_model()
+    context_embeddings = []
+    chunk_embeddings = []
+    chunks = []
+    chunk_with_contexts = []
 
+    for chunk, context, chunk_id in zip(chunk_context.chunks, chunk_context.chunk_contexts, chunk_context.chunk_ids):
+        context_embedding = model.encode(chunk + '-\n' + context)
+        chunk_embedding = model.encode(chunk)
 
-class TextChunk(BaseModel):
-    context_embeddings: List[List[float]]
-    chunk_embeddings: List[List[float]]
-    chunk: List[str]
-    chunk_with_context: List[str]
-    chunk_ids: List[str]  # 新增
+        context_embeddings.append(context_embedding.tolist())
+        chunk_embeddings.append(chunk_embedding.tolist())
+        chunks.append(chunk)
+        chunk_with_contexts.append(context)
 
-class TextEmbeddingExtractor(IndexifyFunction):
-    name = "text-embedding-extractor"
-    description = "Extractor class that captures an embedding model"
-    system_dependencies = []
-    input_mime_types = ["text"]
-    image = image
+    return {
+        'context_embeddings': context_embeddings,
+        'chunk_embeddings': chunk_embeddings,
+        'chunks': chunks,
+        'contexts': chunk_with_contexts,
+        'chunk_ids': chunk_context.chunk_ids
+    }
 
-    def __init__(self):
-        super().__init__()
-        self.model = get_model()  # 使用 get_model 函数获取模型
+def process_document(doc, file_name):
+    """处理文档的主函数"""
+    try:
+        logging.info(f"开始处理文档: {file_name}")
+        # 1. 生成文档块和上下文
+        chunk_context = generate_chunk_contexts(doc, file_name)
+        
+        # 2. 处理嵌入
+        embeddings_data = process_embeddings(chunk_context)
+        
+        # 3. 写入数据库
+        success = write_to_lancedb(embeddings_data)
+        
+        if success:
+            logging.info(f"文档 {file_name} 处理完成")
+        else:
+            logging.error(f"文档 {file_name} 处理失败")
+            
+    except Exception as e:
+        logging.error(f"处理文档 {file_name} 时出错: {str(e)}")
+        logging.error(traceback.format_exc())
+        raise
 
-    def run(self, input: ChunkContext) -> TextChunk:
-        context_embeddings = []
-        chunk_embeddings = []
-        chunks = []
-        chunk_with_contexts = []
-
-        for chunk, context, chunk_id in zip(input.chunks, input.chunk_contexts, input.chunk_ids):
-            context_embedding = self.model.encode(chunk + '-\n' + context)
-            chunk_embedding = self.model.encode(chunk)
-
-            context_embeddings.append(context_embedding.tolist())
-            chunk_embeddings.append(chunk_embedding.tolist())
-            chunks.append(chunk)
-            chunk_with_contexts.append(context)
-
-        return TextChunk(
-            context_embeddings=context_embeddings,
-            chunk_embeddings=chunk_embeddings,
-            chunk=chunks,
-            chunk_with_context=chunk_with_contexts,
-            chunk_ids=input.chunk_ids  # 新增
+def write_to_lancedb(chunk_data):
+    """将数据写入 LanceDB"""
+    try:
+        db_client = lancedb.connect("vectordb.lance")
+        contextual_chunk_table = db_client.create_table(
+            "contextual-chunk-embeddings", 
+            schema=ContextualChunkEmbeddingTable, 
+            exist_ok=True
+        )
+        chunk_table = db_client.create_table(
+            "chunk-embeddings", 
+            schema=ChunkEmbeddingTable, 
+            exist_ok=True
         )
 
-
-class ContextualChunkEmbeddingTable(LanceModel):
-    vector: Vector(384)
-    chunk: str
-    chunk_with_context: str
-    chunk_id: str  # 新增
-
-
-class ChunkEmbeddingTable(LanceModel):
-    vector: Vector(384)
-    chunk: str
-    chunk_id: str  # 新增
-
-
-class LanceDBWriter(IndexifyFunction):
-    name = "lancedb_writer_context_rag"
-    image = image
-
-    def __init__(self):
-        super().__init__()
-        self._client = lancedb.connect("vectordb.lance")
-        self._contextual_chunk_table = self._client.create_table(
-            "contextual-chunk-embeddings", schema=ContextualChunkEmbeddingTable, exist_ok=True
-        )
-
-        self._chunk_table = self._client.create_table(
-            "chunk-embeddings", schema=ChunkEmbeddingTable, exist_ok=True
-        )
-
-    def run(self, input: TextChunk) -> bool:
-        for context_embedding, chunk_embedding, chunk, context, chunk_id in (
-                zip(input.context_embeddings, input.chunk_embeddings, input.chunk, input.chunk_with_context, input.chunk_ids)
+        # 写入数据
+        for context_embedding, chunk_embedding, chunk, context, chunk_id in zip(
+            chunk_data['context_embeddings'],
+            chunk_data['chunk_embeddings'],
+            chunk_data['chunks'],
+            chunk_data['contexts'],
+            chunk_data['chunk_ids']
         ):
-            self._contextual_chunk_table.add(
-                [
-                    ContextualChunkEmbeddingTable(vector=context_embedding, chunk=chunk, chunk_with_context=context, chunk_id=chunk_id)
-                ]
-            )
+            contextual_chunk_table.add([
+                ContextualChunkEmbeddingTable(
+                    vector=context_embedding,
+                    chunk=chunk,
+                    chunk_with_context=context,
+                    chunk_id=chunk_id
+                )
+            ])
 
-            self._chunk_table.add(
-                [
-                    ChunkEmbeddingTable(vector=chunk_embedding, chunk=chunk, chunk_id=chunk_id)
-                ]
-            )
-
+            chunk_table.add([
+                ChunkEmbeddingTable(
+                    vector=chunk_embedding,
+                    chunk=chunk,
+                    chunk_id=chunk_id
+                )
+            ])
+        
         return True
-
-
-def rag_call(payload):
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "你是一个AI助手，负责分析文档并回答相关问题。请严格使用中文提供你的答案，不要包含任何英文。在回答的开头，请严格按照'患者姓名：<姓名>'的格式提供患者姓名，然后换行继续你的回答。所有输出，包括'答案'、'解释'、'信心'等标签，以及任何上下文描述，都必须使用中文。如果你遇到任何英文术语，请尝试将其翻译成中文或者用中文解释。"},
-            {"role": "user", "content": payload}
-        ]
-    )
-
-    return response.choices[0].message.content, response.usage
-
+    except Exception as e:
+        logging.error(f"写入 LanceDB 时出错: {str(e)}")
+        logging.error(traceback.format_exc())
+        return False
 
 def parse_pdf(file_path):
     """解析PDF文件并返回文本内容"""
@@ -239,189 +205,33 @@ def parse_pdf(file_path):
         logging.error(traceback.format_exc())
         raise
 
-
-def process_document(doc, file_name):
-    try:
-        logging.info(f"开始处理文档: {file_name}")
-        g: Graph = Graph("test", start_node=generate_chunk_contexts)
-        g.add_edge(generate_chunk_contexts, TextEmbeddingExtractor)
-        g.add_edge(TextEmbeddingExtractor, LanceDBWriter)
-        g.run(block_until_done=True, doc=doc, file_name=file_name)
-        logging.info(f"文档 {file_name} 处理完成")
-    except Exception as e:
-        logging.error(f"处理文档 {file_name} 时出错: {str(e)}")
-        logging.error(traceback.format_exc())
-        raise
-
-
-def answer_question(question):
-    try:
-        logging.info(f"开始回答问题: {question}")
-        model = get_model()
-        l_client = lancedb.connect("vectordb.lance")
-        question_embd = model.encode(question)
-
-        # RAG Output
-        chunks = l_client.open_table("chunk-embeddings").search(question_embd).limit(20).to_list()
-        
-        logging.info("检索到的所有chunks:")
-        for chunk in chunks:
-            logging.info(f"Chunk {chunk['chunk_id']} 前100字符:\n{chunk['chunk'][:100]}...\n")
-
-        d = []
-        for chunk in chunks:
-            d.append(f'chunk_id: {chunk["chunk_id"]}')
-            d.append(f'chunk: {chunk["chunk"]}')
-        p = '\n'.join(d)
-
-        regular_prompt = f"""
-        你面前有一份文档的信息。文档已被分成多个块，我们提供了每个块的ID和内容。信息以以下形式呈现：
-
-            chunk_id: <块ID>
-            chunk: <文本内容>
-            chunk_id: <块ID>
-            chunk: <文本内容>
-
-        请仅基于提供的信息块回答问题。你的回答应包括：
-        1. 问题的答案
-        2. 解释为什么选择特定的引用
-        3. 对你的答案的信心分数（0-100）
-        4. 你用于回答的完整文本块内容（包括chunk_id和chunk内容）
-
-        请严格按以下格式回答：
-        答案：<你的答案>
-        解释：<你选择特定引用的解释>
-        信心：<你的信心分数>
-        引用：
-        <chunk_id1>
-        <chunk1的完整内容>
-        <chunk_id2>
-        <chunk2的完整内容>
-        ...
-
-        非常重要：请确保你引用的chunk内容与你实际使用的信息完全一致。只引用你真正用于回答的文本块。
-
-        问题：{question}
-
-            {p}
-        """
-
-        rag_response, _ = rag_call(regular_prompt)
-        logging.info(f"RAG 原始响应: {rag_response}")
-        
-        # 提取模型引用的chunk内容
-        cited_chunks = extract_cited_chunks(rag_response)
-        logging.info(f"提取的 chunks: {cited_chunks}")
-
-        # 准备折叠显示的引用内容
-        folded_citations = []
-        for chunk_id, chunk_content in cited_chunks:
-            folded_citations.append({
-                "chunk_id": chunk_id,
-                "content": chunk_content
-            })
-
-        # 将响应拆分成各个部分
-        response_parts = rag_response.split("\n")
-        patient_name = response_parts[0]
-        answer = next(part for part in response_parts if part.startswith("答案："))
-        explanation = next(part for part in response_parts if part.startswith("解释："))
-        confidence = next(part for part in response_parts if part.startswith("信心："))
-
-        # 构建新的响应格式
-        formatted_response = {
-            "patient_name": patient_name,
-            "answer": answer,
-            "explanation": explanation,
-            "confidence": confidence,
-            "citations": folded_citations
-        }
-
-        # Contextual RAG Output
-        contextual_chunks = l_client.open_table("contextual-chunk-embeddings").search(question_embd).limit(20).to_list()
-        d = []
-        for chunk in contextual_chunks:
-            d.append(f'chunk_id: {chunk["chunk_id"]}')
-            d.append(f'chunk: {chunk["chunk"]}')
-            d.append(f'chunk_context: {chunk["chunk_with_context"]}')
-        p = '\n'.join(d)
-
-        contextual_prompt = f"""
-        你面前有一份文档的信息。文档已被分成多个块，我们提供了每个块的ID、内容和上下文。信息以以下形式呈现：
-            chunk_id: <块ID>
-            chunk: <文本内容>
-            chunk_context: <上下文>
-            chunk_id: <块ID>
-            chunk: <文本内容>
-            chunk_context: <上下文>
-
-        请仅基于提供的信息块回答问题。你的回答应包括：
-        1. 问题的答案
-        2. 解释为何选择特定的引用
-        3. 对你的答案的信心分数（0-100）
-        4. 你用于回答的完整文本块内容（包括chunk_id、chunk内容和chunk_context）
-
-        请按以下格式回答：
-        答案：<你的答案>
-        解释：<你选择特定引用的解释>
-        信心：<你的信心分数>
-        引用：
-        <chunk_id1>
-        <chunk1的完整内容>
-        <chunk1的上下文>
-        <chunk_id2>
-        <chunk2的完整内容>
-        <chunk2的上下文>
-        ...
-
-        问题：{question}
-
-            {p}
-        """
-
-        contextual_response, _ = rag_call(contextual_prompt)
-        
-        # 提取上下文感知RAG的引用内容
-        contextual_cited_chunks = extract_cited_chunks_with_context(contextual_response)
-        
-        # 准备上下文感知RAG的折叠显示引用内容
-        contextual_folded_citations = []
-        for chunk_id, chunk_content, chunk_context in contextual_cited_chunks:
-            contextual_folded_citations.append({
-                "chunk_id": chunk_id,
-                "content": chunk_content,
-                "context": chunk_context
-            })
-
-        # 将上下文感知RAG响应拆分成各个部分
-        contextual_response_parts = contextual_response.split("\n")
-        contextual_patient_name = contextual_response_parts[0]
-        contextual_answer = next(part for part in contextual_response_parts if part.startswith("答案："))
-        contextual_explanation = next(part for part in contextual_response_parts if part.startswith("解释："))
-        contextual_confidence = next(part for part in contextual_response_parts if part.startswith("信心："))
-
-        # 构建新的上下文感知RAG响应格式
-        formatted_contextual_response = {
-            "patient_name": contextual_patient_name,
-            "answer": contextual_answer,
-            "explanation": contextual_explanation,
-            "confidence": contextual_confidence,
-            "citations": contextual_folded_citations
-        }
-
-        # 添加后处理步骤，将英文转换为中文
-        formatted_response = convert_english_to_chinese(formatted_response)
-        formatted_contextual_response = convert_english_to_chinese(formatted_contextual_response)
-
-        logging.info("问题回答完成")
-        return formatted_response, formatted_contextual_response
-    except Exception as e:
-        logging.error(f"回答问题时出错: {str(e)}")
-        logging.error(traceback.format_exc())
-        raise
-
+def extract_patient_name_from_question(question):
+    """从问题中提取患者姓名"""
+    # 匹配多种可能的问题模式
+    patterns = [
+        r'([^\s]+)得了什么病',
+        r'([^\s]+)做了哪些检查',
+        r'([^\s]+)的检查结果',
+        r'([^\s]+)的病历',
+        r'([^\s]+)的情况',
+        r'关于([^\s]+)的',
+        r'([^\s]+)的'  # 最通用的模式放在最后
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, question)
+        if match:
+            return match.group(1)
+    
+    # 如果没有匹配到任何模式，尝试提取问题中的 "某某" 格式的名字
+    name_match = re.search(r'([^\s]+某某)', question)
+    if name_match:
+        return name_match.group(1)
+    
+    return None
 
 def get_model():
+    """获取或初始化 SentenceTransformer 模型"""
     global global_model
     if global_model is None:
         logging.info("正在加载 SentenceTransformer 模型...")
@@ -429,131 +239,198 @@ def get_model():
         logging.info("SentenceTransformer 模型加载完成")
     return global_model
 
-
-def extract_patient_names_from_chunks(chunks):
-    names = set()
-    for chunk in chunks:
-        chunk_text = chunk['chunk']
-        match = re.search(r'患者姓名：([^\n]+)', chunk_text)
-        if match:
-            names.add(match.group(1).strip())
-    return list(names)
-
-def validate_patient_name(response, chunks, rag_type):
-    patient_name_in_response = extract_patient_name(response)
-    patient_names_in_chunks = extract_patient_names_from_chunks(chunks)
-    
-    if patient_name_in_response not in patient_names_in_chunks:
-        warning_message = f"\n\n警告：{rag_type}回答中的患者姓名 ({patient_name_in_response}) 与文本块中的患者姓名 {patient_names_in_chunks} 不一致，请仔细核对。"
-        logging.warning(warning_message)
-        return response + warning_message
-    
-    # 添加内容一致性检查
-    for chunk in chunks:
-        if patient_name_in_response in chunk['chunk']:
-            if not content_consistency_check(response, chunk['chunk']):
-                warning_message = f"\n\n警告：回答内容与引用的文本块不一致，请仔细核对。"
-                logging.warning(warning_message)
-                return response + warning_message
-    
-    return response
-
-def content_consistency_check(response, chunk_content):
-    # 这里实现一个简单的内容一致性检查
-    # 可以使用更复杂的NLP技术来提高准确性
-    response_keywords = set(response.lower().split())
-    chunk_keywords = set(chunk_content.lower().split())
-    common_keywords = response_keywords.intersection(chunk_keywords)
-    
-    # 如共同关键词占响应关键词的比例低于某个阈值，认为不一致
-    threshold = 0.5
-    if len(common_keywords) / len(response_keywords) < threshold:
-        return False
-    return True
-
-def additional_consistency_check(response, chunks):
-    patient_name = extract_patient_name(response)
-    relevant_chunks = [chunk for chunk in chunks if patient_name in chunk['chunk']]
-    
-    if not relevant_chunks:
-        warning_message = f"\n\n警告：未找到与患者 {patient_name} 相关的文本块，请仔细核对。"
-        logging.warning(warning_message)
-        return response + warning_message
-    
-    for chunk in relevant_chunks:
-        if not content_consistency_check(response, chunk['chunk']):
-            warning_message = f"\n\n警告：回答内容与患者 {patient_name} 的相关文本块不一致，请仔细核对。"
-            logging.warning(warning_message)
-            return response + warning_message
-    
-    return response
-
 def extract_cited_chunks(response):
-    # 从回答中提取引用的chunk内容
-    cited_chunks = []
-    chunks = re.split(r'chunk_id:', response)
-    for chunk in chunks[1:]:  # 跳过第一个元素，因为它是回答的其他部分
-        lines = chunk.strip().split('\n', 1)
-        if len(lines) == 2:
-            chunk_id = lines[0].strip()
-            chunk_content = lines[1].strip()
-            cited_chunks.append((chunk_id, chunk_content))
-    return cited_chunks
-
-def print_cited_part(response):
-    # 打印原始响应中的引用部分
-    cited_part = re.search(r'引用：.*', response, re.DOTALL)
-    if cited_part:
-        logging.info(f"原始响应中的引用部分:\n{cited_part.group(0)}")
-    else:
-        logging.warning("在原始响应中未找到引用部分")
-
-def get_frontend_chunk(chunk_id):
-    l_client = lancedb.connect("vectordb.lance")
-    chunk_table = l_client.open_table("chunk-embeddings")
-    results = chunk_table.search().where(f"chunk_id = '{chunk_id}'").limit(1).to_list()
+    """从响应中提取引用的chunks"""
+    citations = []
+    lines = response.split('\n')
+    in_citations = False
+    current_chunk = {"chunk_id": None, "content": []}
     
-    if results:
-        return results[0]['chunk']
-    else:
-        logging.warning(f"未找到 Chunk ID {chunk_id}")
-        return None
-
-def extract_cited_chunks_with_context(response):
-    # 从上下文感知RAG回答中提取引用的chunk内容和上下文
-    cited_chunks = []
-    chunks = re.split(r'chunk_id:', response)
-    for chunk in chunks[1:]:  # 跳过第一个元素，因为它是回答的其他部分
-        lines = chunk.strip().split('\n', 2)
-        if len(lines) == 3:
-            chunk_id = lines[0].strip()
-            chunk_content = lines[1].strip()
-            chunk_context = lines[2].strip()
-            cited_chunks.append((chunk_id, chunk_content, chunk_context))
-    return cited_chunks
-
-def convert_english_to_chinese(response):
-    # 这个函数将尝试将响应中的英文转换为中文
-    english_to_chinese = {
-        "chunk": "文本块",
-        "content": "内容",
-        "context": "上下文",
-        # 添加其他可能出现的英文词汇及其中文翻译
-    }
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        if line.startswith("引用："):
+            in_citations = True
+            continue
+            
+        if in_citations:
+            # 如果是新的 chunk_id
+            if line.startswith("chunk_id:"):
+                # 保存之前的 chunk（如果有的话）
+                if current_chunk["chunk_id"] and current_chunk["content"]:
+                    citations.append({
+                        "chunk_id": current_chunk["chunk_id"],
+                        "content": "\n".join(current_chunk["content"])
+                    })
+                # 开始新的 chunk
+                current_chunk = {
+                    "chunk_id": line.replace("chunk_id:", "").strip(),
+                    "content": []
+                }
+            # 如果是内容部分
+            elif current_chunk["chunk_id"]:
+                current_chunk["content"].append(line)
+            # 如果没有 chunk_id 但有内容，可能是直接的引用内容
+            elif line:
+                citations.append({
+                    "chunk_id": "引用内容",
+                    "content": line
+                })
     
-    for eng, chn in english_to_chinese.items():
-        if isinstance(response, dict):
-            for key in response:
-                if isinstance(response[key], str):
-                    response[key] = response[key].replace(eng, chn)
-                elif isinstance(response[key], list):
-                    response[key] = [convert_english_to_chinese(item) for item in response[key]]
-        elif isinstance(response, str):
-            response = response.replace(eng, chn)
+    # 保存最后一个 chunk
+    if current_chunk["chunk_id"] and current_chunk["content"]:
+        citations.append({
+            "chunk_id": current_chunk["chunk_id"],
+            "content": "\n".join(current_chunk["content"])
+        })
     
-    return response
+    return citations
 
-# 在文件末尾添加以下代码，确保在导入时就加载模型
-get_model()
+def answer_question(question):
+    """回答问题的主函数"""
+    try:
+        logging.info(f"开始回答问题: {question}")
+        
+        # 从问题中提取患者姓名
+        target_patient = extract_patient_name_from_question(question)
+        if target_patient:
+            logging.info(f"从问题中提取的患者姓名: {target_patient}")
+        else:
+            logging.info("未从问题中提取到患者姓名")
 
-# ... [其他函数和类保持不变] ...
+        model = get_model()
+        l_client = lancedb.connect("vectordb.lance")
+        question_embd = model.encode(question)
+
+        # 获取所有匹配的文本块
+        chunks = l_client.open_table("chunk-embeddings").search(question_embd).limit(10).to_list()
+        
+        # 如果指定了患者姓名，只保留相关患者的文本块
+        if target_patient:
+            filtered_chunks = []
+            for chunk in chunks:
+                if target_patient in chunk["chunk_id"]:
+                    filtered_chunks.append(chunk)
+            chunks = filtered_chunks[:5]
+        else:
+            chunks = chunks[:5]
+
+        if not chunks:
+            return {
+                "patient_name": f"患者姓名：{target_patient if target_patient else '未知'}",
+                "answer": "答案：未找到该患者的相关信息",
+                "explanation": "解释：数据库中没有这位患者的病历记录",
+                "confidence": "信心：0",
+                "citations": []
+            }
+
+        logging.info(f"找到的相关文本块数量: {len(chunks)}")
+        for chunk in chunks:
+            logging.info(f"Chunk {chunk['chunk_id']} 前100字符:\n{chunk['chunk'][:100]}...\n")
+
+        # 构建提示词
+        d = []
+        for chunk in chunks:
+            content = chunk["chunk"]
+            if len(content) > 500:
+                content = content[:500] + "..."
+            d.append(f'chunk_id: {chunk["chunk_id"]}\nchunk: {content}')
+        p = '\n\n'.join(d)
+
+        # 更明确的提示词格式要求
+        regular_prompt = f"""请严格按照以下格式回答问题，并确保只回答关于患者 {target_patient} 的信息：
+
+患者姓名：{target_patient}
+答案：<简洁的回答>
+解释：<为什么选择这些引用>
+信心：<0-100分>
+引用：
+<使用的文本块>
+
+问题：{question}
+
+文本块：
+{p}"""
+
+        rag_response, _ = rag_call(regular_prompt)
+        logging.info(f"RAG 原始响应: {rag_response}")
+
+        def safe_extract_section(response_text, prefix):
+            """安全地从响应中提取特定部分"""
+            lines = response_text.split('\n')
+            for line in lines:
+                if line.startswith(prefix):
+                    return line
+            return f"{prefix}未找到"
+
+        # 提取各个部分
+        patient_name = f"患者姓名：{target_patient}"  # 直接使用提取的患者姓名
+        answer = safe_extract_section(rag_response, "答案：")
+        explanation = safe_extract_section(rag_response, "解释：")
+        confidence = safe_extract_section(rag_response, "信心：")
+
+        # 提取引用部分
+        citations = []
+        lines = rag_response.split('\n')
+        in_citations = False
+        current_citation = ""
+        
+        for line in lines:
+            if line.startswith("引用："):
+                in_citations = True
+                continue
+            
+            if in_citations and line.strip():
+                current_citation += line + "\n"
+        
+        if current_citation:
+            citations.append({
+                "chunk_id": "引用内容",
+                "content": current_citation.strip()
+            })
+
+        # 如果没有提取到引用，使用原始文本块
+        if not citations:
+            for chunk in chunks[:2]:  # 只使用最相关的两个文本块
+                citations.append({
+                    "chunk_id": chunk["chunk_id"],
+                    "content": chunk["chunk"][:500]  # 限制内容长度
+                })
+
+        # 构建新的响应格式
+        formatted_response = {
+            "patient_name": patient_name,
+            "answer": answer,
+            "explanation": explanation,
+            "confidence": confidence,
+            "citations": citations
+        }
+
+        return formatted_response
+
+    except Exception as e:
+        logging.error(f"回答问题时出错: {str(e)}")
+        logging.error(traceback.format_exc())
+        return {
+            "patient_name": f"患者姓名：{target_patient if target_patient else '未知'}",
+            "answer": f"答案：回答问题时出错: {str(e)}",
+            "explanation": "解释：发生了处理错误",
+            "confidence": "信心：0",
+            "citations": []
+        }
+
+def rag_call(payload):
+    """调用 RAG 系统"""
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {
+                "role": "system", 
+                "content": "你是一个医疗助手，负责分析病历并回答问题。请严格按照以下格式回答：\n患者姓名：<姓名>\n答案：<回答>\n解释：<解释>\n信心：<0-100分>\n引用：<引用内容>"
+            },
+            {"role": "user", "content": payload}
+        ]
+    )
+    return response.choices[0].message.content, response.usage

@@ -6,7 +6,6 @@ import traceback
 import lancedb
 import pyarrow as pa
 import re
-from indexify.functions_sdk.graph import Graph
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,7 +51,7 @@ def process_all_pdfs():
 if st.button("处理 data 目录下的所有 PDF 文档"):
     process_all_pdfs()
 
-# 文档上传部分（保留原有功能）
+# 文档上传部分
 uploaded_file = st.file_uploader("上传新的PDF文档", type="pdf")
 
 if uploaded_file is not None:
@@ -73,7 +72,7 @@ if uploaded_file is not None:
         logging.error(f"处理文档时发生错误: {str(e)}")
         logging.error(traceback.format_exc())
 
-# 答部分
+# 问答部分
 st.subheader("文档问答")
 
 # 修改问题输入框，添加 on_change 参数
@@ -86,37 +85,19 @@ if 'submit_question' not in st.session_state:
 if st.session_state.submit_question and question:
     try:
         with st.spinner("正在生成答案..."):
-            rag_response, contextual_response = answer_question(question)
+            response = answer_question(question)
         
         st.subheader("RAG 输出:")
-        st.markdown(f"**{rag_response['patient_name']}**")
-        st.markdown(f"**{rag_response['answer']}**")
-        st.markdown(f"**{rag_response['explanation']}**")
-        st.markdown(f"**{rag_response['confidence']}**")
+        st.markdown(f"**{response['patient_name']}**")
+        st.markdown(f"**{response['answer']}**")
+        st.markdown(f"**{response['explanation']}**")
+        st.markdown(f"**{response['confidence']}**")
         
         # 创建一个可展开的部分来显示引用
         with st.expander("引用"):
-            for citation in rag_response['citations']:
+            for citation in response['citations']:
                 st.write(f"文本块 ID: {citation['chunk_id']}")
                 st.write(f"内容: {citation['content']}")
-                st.write("---")
-
-        st.subheader("上下文感知 RAG 输出:")
-        st.markdown(f"**{contextual_response['patient_name']}**")
-        st.markdown(f"**{contextual_response['answer']}**")
-        st.markdown(f"**{contextual_response['explanation']}**")
-        st.markdown(f"**{contextual_response['confidence']}**")
-        
-        # 创建一个可展开的部分来显示上下文感知引用
-        with st.expander("上下文感知引用"):
-            for citation in contextual_response['citations']:
-                st.write(f"文本块 ID: {citation['chunk_id']}")
-                st.write("内容:")
-                st.write(citation['content'])
-                st.write("上下文:")
-                # 移除 'chunk:' 和 'chunk_context:' 前缀
-                context = citation['context'].replace('chunk:', '').replace('chunk_context:', '').strip()
-                st.write(context)
                 st.write("---")
 
         # 重置提交状态
@@ -158,8 +139,6 @@ st.sidebar.markdown("""
 8. 成本效益高：结合 Claude 的提示缓存功能，可以显著降低处理成本。
 
 9. 与重排序结合效果更佳：当与重排序技术结合时，可以将检索失败率降低高达67%。
-
-这种方法通过保留和利用上下文信息，显著提高了信息检索的准确性和相关性，从而增强了AI系统回答复杂问题的能力。
 """)
 
 # 在页面底部添加开发者信息
@@ -172,9 +151,3 @@ def validate_lancedb_data():
     for i, chunk in enumerate(chunks):
         patient_name = extract_patient_name(chunk['chunk'].as_py())
         print(f"Chunk {i}: Patient: {patient_name}, Content: {chunk['chunk'].as_py()[:100]}...")  # 打印前100个字符
-
-def process_document(doc, file_name):
-    g: Graph = Graph("test", start_node=generate_chunk_contexts)
-    g.add_edge(generate_chunk_contexts, TextEmbeddingExtractor)
-    g.add_edge(TextEmbeddingExtractor, LanceDBWriter)
-    g.run(block_until_done=True, doc=doc, file_name=file_name)

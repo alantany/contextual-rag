@@ -1,6 +1,5 @@
 streamlit
-PyMuPDF
-indexify
+PyMuPDF==1.23.8
 sentence-transformers
 lancedb
 openai
